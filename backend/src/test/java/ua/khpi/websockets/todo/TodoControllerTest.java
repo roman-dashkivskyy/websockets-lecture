@@ -9,6 +9,7 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import org.springframework.test.web.servlet.request.RequestPostProcessor;
 import ua.khpi.websockets.IntegrationTest;
 
+import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
@@ -16,6 +17,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -87,6 +89,48 @@ class TodoControllerTest {
 			.andExpect(status().isForbidden())
 			.andExpect(jsonPath("$.detail").value("Only the owner can change this list"));
 		mvc.perform(delete("/api/lists/{id}", listId).with(as("bob"))).andExpect(status().isForbidden());
+	}
+
+	@Test
+	void replaceMyListsSwapsOnlyMyOwnLists() throws Exception {
+		// carol is used only here and in the WebSocket replace test, so other tests' lists aren't affected
+		long oldPublic = createList("carol", "Old public", Visibility.PUBLIC);
+		long oldPrivate = createList("carol", "Old private", Visibility.PRIVATE);
+		long alicesList = createList("alice", "Alice keeps this", Visibility.PUBLIC);
+
+		mvc.perform(json(put("/api/lists/mine"), """
+				[
+				  {"title": "New A", "visibility": "PUBLIC",
+				   "items": [{"title": "one", "done": false}, {"title": "two", "done": true}]},
+				  {"title": "New B", "visibility": "PRIVATE", "items": []}
+				]""").with(as("carol")))
+			.andExpect(status().isOk())
+			.andExpect(jsonPath("$.length()").value(2))
+			.andExpect(jsonPath("$[0].title").value("New A"))
+			.andExpect(jsonPath("$[0].items.length()").value(2))
+			.andExpect(jsonPath("$[0].items[1].done").value(true))
+			.andExpect(jsonPath("$[1].visibility").value("PRIVATE"));
+
+		mvc.perform(get("/api/lists").with(as("carol")))
+			.andExpect(jsonPath("$[*].id", not(hasItem((int) oldPublic))))
+			.andExpect(jsonPath("$[*].id", not(hasItem((int) oldPrivate))))
+			.andExpect(jsonPath("$[*].id", hasItem((int) alicesList)))
+			.andExpect(jsonPath("$[?(@.owner == 'carol')].title", containsInAnyOrder("New A", "New B")));
+	}
+
+	@Test
+	void replaceMyListsValidatesEveryNestedItem() throws Exception {
+		mvc.perform(json(put("/api/lists/mine"), """
+				[{"title": "Ok", "visibility": "PUBLIC", "items": [{"title": "  ", "done": false}]}]""")
+				.with(as("carol")))
+			.andExpect(status().isBadRequest());
+		mvc.perform(json(put("/api/lists/mine"), """
+				[{"title": "No items field", "visibility": "PUBLIC"}]""").with(as("carol")))
+			.andExpect(status().isBadRequest());
+		mvc.perform(json(put("/api/lists/mine"), "[null]").with(as("carol"))).andExpect(status().isBadRequest());
+		mvc.perform(json(put("/api/lists/mine"), """
+				[{"title": "Null item", "visibility": "PUBLIC", "items": [null]}]""").with(as("carol")))
+			.andExpect(status().isBadRequest());
 	}
 
 	@Test

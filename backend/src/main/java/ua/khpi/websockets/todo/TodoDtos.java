@@ -2,6 +2,7 @@ package ua.khpi.websockets.todo;
 
 import java.util.List;
 
+import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
@@ -41,6 +42,14 @@ public final class TodoDtos {
 	}
 
 	public record CreateItemRequest(@NotBlank @Size(max = 200) String title) {
+	}
+
+	/** One list in PUT /api/lists/mine: the whole new content, items included. */
+	public record ReplaceListRequest(@NotBlank @Size(max = 100) String title, @NotNull Visibility visibility,
+			@NotNull List<@NotNull @Valid ReplaceItemRequest> items) {
+	}
+
+	public record ReplaceItemRequest(@NotBlank @Size(max = 200) String title, boolean done) {
 	}
 
 	/** Both fields are optional: send only what changes. A title, if sent, must not be blank. */

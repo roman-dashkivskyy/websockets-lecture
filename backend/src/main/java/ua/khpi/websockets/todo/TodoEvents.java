@@ -1,22 +1,29 @@
 package ua.khpi.websockets.todo;
 
-import ua.khpi.websockets.todo.TodoDtos.TodoListDto;
+import java.util.List;
 
 /**
- * Published by {@link TodoService} after every change. The todo package doesn't know who listens:
- * in phase 2 it's the WebSocket notifier.
+ * Published by {@link TodoService} after every change. They carry only identifiers: whoever needs the data
+ * re-reads it (see TodoQueries). The todo package doesn't know who listens.
  */
 public final class TodoEvents {
 
 	private TodoEvents() {
 	}
 
-	/** A list was created or changed (title, items). Carries the full new state of the list. */
-	public record ListChanged(TodoListDto list) {
+	/** A list was created or changed (title, items). */
+	public record ListChanged(long listId) {
 	}
 
-	/** A list was deleted. Visibility and owner decide who must be told. */
+	/** A list was deleted. It can't be re-read anymore, so the event keeps what's needed to tell the right users. */
 	public record ListDeleted(long listId, Visibility visibility, String owner) {
+	}
+
+	/** All lists of one user were replaced at once (PUT /api/lists/mine). */
+	public record ListsReplaced(String owner, List<RemovedList> removed, List<Long> createdIds) {
+	}
+
+	public record RemovedList(long listId, Visibility visibility) {
 	}
 
 }

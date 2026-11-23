@@ -17,6 +17,7 @@ Each phase of the lecture is a git tag:
 | `step-2-websockets` | Live updates: the server pushes every change over a WebSocket |
 | `step-3-load-balancer` | Three instances behind a load balancer, and live updates break |
 | `step-4-message-broker` | RabbitMQ fan-out: every instance hears every change, live updates work again |
+| `step-5-short-messages` | Only ids go through the broker; each instance re-reads the data from Postgres |
 
 ## Phase 1 — todo app over HTTP
 
@@ -59,9 +60,10 @@ Known limitations, kept on purpose for the lecture:
 - **The token is checked only at the handshake.** An open socket keeps receiving updates after the JWT expires,
   but the next HTTP command gets 401 and signs the user out.
 - **Concurrent edits can show a stale list.** Two people changing the same list at the same moment each push a
-  snapshot with only their own change, and the last one wins until the next change. Phase 5 sends ids instead,
-  and the receiver re-reads the current state.
+  snapshot with only their own change, and the last one wins until the next change. *Solved in phase 5:* only
+  ids are sent, and the receiver re-reads the current state.
 - **Pushes run on the HTTP request thread** after commit, so a very slow client can delay that response.
+  (Since phase 4 they run on each instance's RabbitMQ listener thread instead.)
 
 ## Phase 3 — load balancer with three instances (and why it breaks)
 
@@ -147,6 +149,80 @@ Known limitations:
   compose healthcheck) stays UP. HTTP still works, only live updates stop.
 - **Messages still carry whole lists.** Phase 5 shows why that hurts and sends only ids.
 
+## Phase 5 — only identifiers go through the broker
+
+**The problem.** `PUT /api/lists/mine` replaces *all* of a user's lists at once, with any number of items. In
+phase 4 the whole new content would travel through RabbitMQ, and the fanout exchange copies it into the queue of
+**every** instance. Thousands of items × number of instances, for every such request: the broker becomes the
+bottleneck. Brokers are built for many small messages, not a few huge ones.
+
+**The fix: send a small "spec", not the data.** The message says only *which processor* should run (header
+`processor`) and *with which ids* (JSON body). Each instance's processor re-reads the current data from Postgres
+and pushes it to its own sockets.
+
+```
+Alice ─PUT─► Alpha ─► Postgres (commit)
+               └─ publish ─► [fanout todo.events] ─► every instance's queue
+                  processor = LISTS_REPLACED               │
+                  {"owner":"alice","removed":[…],          ▼
+                   "createdIds":[…]}           processor re-reads the new lists from Postgres
+                                               → pushes them to THIS instance's sockets
+```
+
+| Processor        | Spec body                                      | What it does on each instance                     |
+|------------------|------------------------------------------------|---------------------------------------------------|
+| `LIST_CHANGED`   | `{"listId": 42}`                               | load list 42, push it (public → all, private → owner) |
+| `LIST_DELETED`   | `{"listId": 42, "visibility": …, "owner": …}`  | push `LIST_DELETED` (the list can't be re-read)   |
+| `LISTS_REPLACED` | `{"owner": …, "removed": […], "createdIds": […]}` | push the deletions, load the new lists in one query, push them |
+
+- **Measured:** replacing 50 lists × 200 items (a 354 KB HTTP request) publishes a message of about
+  **200 bytes**. Its size grows with the number of lists (their ids), never with the number of items.
+  (188 bytes was measured for a user who had no lists before.)
+- **The browser protocol didn't change**, so the frontend didn't either.
+- **A side benefit:** receivers always read the current state, so concurrent edits can no longer leave a stale list
+  on screen.
+- **The trade-off:** every instance runs a database read per event, even instances where nobody who should
+  receive it is connected. That's usually far cheaper than pushing big payloads through the broker, and the
+  database already serves these reads for HTTP.
+- **Known limitation:** two simultaneous replaces by the same user both survive: the user ends up with both new
+  sets. Locking the user's row first (`SELECT … FOR UPDATE`) would serialize them.
+- **Backend pieces** (`realtime/`):
+  - `TodoEventPublisher`: publishes the spec after commit.
+  - `TodoEventListener`: picks the processor named in the header; unknown ones are dropped.
+  - `SpecProcessors`: the processors that re-read the data.
+  - `SocketRouter`: public → all, private → the owner.
+
+Demo script:
+1. Bob's tab on **Instance 2**.
+2. Run `node tools/replace-my-lists.mjs carol 50 200` (Node 22+). It replaces Carol's lists through the load
+   balancer and prints the request size and the time taken. Use carol: replacing alice's lists would delete the
+   seeded lists used by the earlier demos (until `docker compose … down -v`).
+3. Bob's board updates: Carol's new public lists appear, her old ones disappear, and her private lists never show up.
+4. To see the message sizes:
+   - start the stack with `REALTIME_LOG_LEVEL=DEBUG`; each backend then logs lines like
+     `Published LISTS_REPLACED spec (188 bytes)`;
+   - the RabbitMQ UI shows the same tiny messages.
+
+## Recap: where we started and where we ended
+
+| Phase | What we added | What it taught |
+|-------|---------------|----------------|
+| 1 | A todo app over plain HTTP | Others see changes only after a refresh |
+| 2 | WebSocket push (handshake, session registry, `notifyAll` / `notifyUser`) | Live updates, but only on one instance |
+| 3 | Three instances behind a load balancer | Each instance pushes only to its own sockets: updates get lost |
+| 4 | RabbitMQ fanout exchange, one queue per instance | Every instance hears every change |
+| 5 | Specs with ids instead of whole objects | Keep broker messages small; re-read data where it's needed |
+
+**In production you would also consider:**
+- **STOMP over WebSocket with a broker relay.** You get user destinations instead of your own session registry,
+  heartbeats, and the token in the CONNECT frame instead of the URL. We built the raw version on purpose, to see
+  what happens underneath.
+- **The transactional outbox.** It stores events in the same database transaction and publishes them afterwards,
+  so a broker outage doesn't lose events.
+- **Bulk inserts:** sequence-based ids with JDBC batching (`hibernate.jdbc.batch_size`) instead of IDENTITY
+  (10,000 items are 10,000 round trips here), plus a cap on the request size.
+- **Managed services:** a cloud load balancer, a managed RabbitMQ, or a hosted WebSocket gateway.
+
 ### API
 
 | Method | Path                     | Body                       |
@@ -155,6 +231,7 @@ Known limitations:
 | GET    | `/api/auth/me`           |                            |
 | GET    | `/api/lists`             |                            |
 | POST   | `/api/lists`             | `{title, visibility}`      |
+| PUT    | `/api/lists/mine`        | `[{title, visibility, items: [{title, done}]}]` (replaces all my lists) |
 | PATCH  | `/api/lists/{id}`        | `{title}`                  |
 | DELETE | `/api/lists/{id}`        |                            |
 | POST   | `/api/lists/{id}/items`  | `{title}`                  |

@@ -7,6 +7,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Predicate;
 
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.AfterEach;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -118,6 +120,71 @@ class WebSocketIntegrationTest {
 		assertListChanged(aliceTab1.poll(5, TimeUnit.SECONDS), listId, "Diary");
 		assertListChanged(aliceTab2.poll(5, TimeUnit.SECONDS), listId, "Diary");
 		assertThat(bob.poll(500, TimeUnit.MILLISECONDS)).as("Bob must not hear about Alice's private list").isNull();
+	}
+
+	@Test
+	void replacingAllListsPushesOnlyWhatEachUserMaySee() throws Exception {
+		String carolToken = login("carol"); // carol is used only for replace tests (see TodoControllerTest)
+		BlockingQueue<String> carol = connect(carolToken);
+		BlockingQueue<String> bob = connect(login("bob"));
+
+		long oldPublic = createList(carolToken, "Carol old", "PUBLIC");
+		// pushes go through the broker asynchronously: wait until both have seen it before replacing
+		collectUntil(carol, m -> isListChanged(m, "Carol old"));
+		collectUntil(bob, m -> isListChanged(m, "Carol old"));
+
+		mvc.perform(put("/api/lists/mine").header("Authorization", "Bearer " + carolToken)
+				.contentType(MediaType.APPLICATION_JSON).content("""
+						[{"title": "Carol fresh", "visibility": "PUBLIC", "items": [{"title": "x", "done": false}]},
+						 {"title": "Carol hidden", "visibility": "PRIVATE", "items": []}]"""))
+			.andExpect(status().isOk());
+
+		// Carol gets all of it, re-read from the database by the processor
+		List<String> carolGot = collectUntil(carol, m -> isListChanged(m, "Carol hidden"));
+		assertThat(carolGot).anyMatch(m -> isListDeleted(m, oldPublic));
+		assertThat(carolGot).anyMatch(m -> isListChanged(m, "Carol fresh")
+				&& "x".equals(JsonPath.read(m, "$.list.items[0].title")));
+
+		// Bob: the old public list is gone and the new public one arrives, but never the private one
+		List<String> bobGot = collectUntil(bob, m -> isListChanged(m, "Carol fresh"));
+		assertThat(bobGot).anyMatch(m -> isListDeleted(m, oldPublic));
+		bobGot.addAll(drain(bob, 500));
+		assertThat(bobGot).noneMatch(m -> isListChanged(m, "Carol hidden"));
+	}
+
+	/** Messages received until one matches (inclusive); fails after 5 s. */
+	private static List<String> collectUntil(BlockingQueue<String> queue, Predicate<String> done) throws Exception {
+		List<String> got = new ArrayList<>();
+		long deadline = System.currentTimeMillis() + 5_000;
+		while (System.currentTimeMillis() < deadline) {
+			String message = queue.poll(deadline - System.currentTimeMillis(), TimeUnit.MILLISECONDS);
+			if (message == null) {
+				break;
+			}
+			got.add(message);
+			if (done.test(message)) {
+				return got;
+			}
+		}
+		throw new AssertionError("expected message did not arrive; got " + got);
+	}
+
+	private static List<String> drain(BlockingQueue<String> queue, long waitMillis) throws Exception {
+		List<String> got = new ArrayList<>();
+		String message;
+		while ((message = queue.poll(waitMillis, TimeUnit.MILLISECONDS)) != null) {
+			got.add(message);
+		}
+		return got;
+	}
+
+	private static boolean isListChanged(String message, String title) {
+		return "LIST_CHANGED".equals(JsonPath.read(message, "$.type")) && title.equals(JsonPath.read(message, "$.list.title"));
+	}
+
+	private static boolean isListDeleted(String message, long listId) {
+		return "LIST_DELETED".equals(JsonPath.read(message, "$.type"))
+				&& ((Number) JsonPath.read(message, "$.listId")).longValue() == listId;
 	}
 
 	private BlockingQueue<String> connect(String token) throws Exception {

@@ -13,8 +13,8 @@ spring:
     password: ${RABBIT_PASSWORD:websockets}
     listener:
       simple:
-        # A message is acknowledged after it has been pushed to the sockets. If pushing fails, drop it
-        # instead of requeueing it forever: browsers resync (reload the lists) when they reconnect.
+        # A message is acknowledged after it has been processed. If processing fails (bad spec, DB error,
+        # push failure), drop it instead of requeueing it forever: browsers resync when they reconnect.
         default-requeue-rejected: false
   jpa:
     open-in-view: false

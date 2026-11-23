@@ -1,7 +1,7 @@
 name: websockets-lecture
 
-# Phase 4: three backend instances behind nginx (round-robin), sharing one database,
-# and RabbitMQ so every instance hears every change.
+# Three backend instances behind nginx (round-robin), sharing one database, and RabbitMQ so every
+# instance hears every change (as small "specs": processor name + ids).
 # All passwords and secrets here are for the demo only.
 
 # Settings every backend instance shares.
@@ -14,6 +14,8 @@ x-backend-env: &backend-env
   RABBIT_HOST: rabbitmq
   RABBIT_USER: websockets
   RABBIT_PASSWORD: ${RABBIT_PASSWORD:-websockets}
+  # REALTIME_LOG_LEVEL=DEBUG logs every published spec with its size (e.g. "Published LIST_CHANGED spec (13 bytes)")
+  LOGGING_LEVEL_UA_KHPI_WEBSOCKETS_REALTIME: ${REALTIME_LOG_LEVEL:-INFO}
 
 x-backend: &backend
   build: ../backend
