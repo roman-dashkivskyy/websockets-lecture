@@ -1,6 +1,7 @@
 name: websockets-lecture
 
-# Phase 3: three backend instances behind nginx (round-robin), sharing one database.
+# Phase 4: three backend instances behind nginx (round-robin), sharing one database,
+# and RabbitMQ so every instance hears every change.
 # All passwords and secrets here are for the demo only.
 
 # Settings every backend instance shares.
@@ -10,12 +11,16 @@ x-backend-env: &backend-env
   DB_PASSWORD: ${DB_PASSWORD:-websockets}
   # The same secret on every instance: a token issued by one instance is accepted by all of them.
   JWT_SECRET: ${JWT_SECRET:-demo-only-jwt-secret-0123456789abcdef}
+  RABBIT_HOST: rabbitmq
+  RABBIT_USER: websockets
+  RABBIT_PASSWORD: ${RABBIT_PASSWORD:-websockets}
 
 x-backend: &backend
   build: ../backend
   image: websockets-lecture/backend:local
   depends_on:
     postgres: { condition: service_healthy }
+    rabbitmq: { condition: service_healthy }
   healthcheck:
     test: ["CMD", "curl", "-fs", "http://localhost:8080/actuator/health/readiness"]
     interval: 5s
@@ -38,6 +43,20 @@ services:
       test: ["CMD-SHELL", "pg_isready -U websockets -d websockets"]
       interval: 3s
       timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: websockets
+      RABBITMQ_DEFAULT_PASS: ${RABBIT_PASSWORD:-websockets}
+    ports:
+      - "127.0.0.1:5672:5672"     # AMQP, for the local dev loop
+      - "127.0.0.1:15672:15672"   # management UI for the demo: http://localhost:15672 (websockets / websockets)
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 5s
       retries: 20
 
   backend-1:

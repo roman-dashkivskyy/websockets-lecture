@@ -5,9 +5,9 @@ one React UI talking to several copies of the same backend.
 
 | Part       | Stack                                                                    |
 |------------|--------------------------------------------------------------------------|
-| `backend`  | Java 25, Spring Boot 4.1, Spring MVC, WebSocket, Spring Security (JWT), JPA, Flyway |
+| `backend`  | Java 25, Spring Boot 4.1, Spring MVC, WebSocket, Spring AMQP, Spring Security (JWT), JPA, Flyway |
 | `frontend` | React 19, TypeScript, Vite 8, Material UI 9                              |
-| `deploy`   | Docker Compose: PostgreSQL, 3 backend instances, nginx load balancer     |
+| `deploy`   | Docker Compose: PostgreSQL, RabbitMQ, 3 backend instances, nginx load balancer |
 
 Each phase of the lecture is a git tag:
 
@@ -16,6 +16,7 @@ Each phase of the lecture is a git tag:
 | `step-1-http`       | Todo app over plain HTTP: login, public and private lists   |
 | `step-2-websockets` | Live updates: the server pushes every change over a WebSocket |
 | `step-3-load-balancer` | Three instances behind a load balancer, and live updates break |
+| `step-4-message-broker` | RabbitMQ fan-out: every instance hears every change, live updates work again |
 
 ## Phase 1 — todo app over HTTP
 
@@ -48,6 +49,8 @@ browser ──HTTP: change──►  nginx :8080 ──► backend ──► Pos
   - `TodoSocketHandler` handles the connection lifecycle.
   - `SessionRegistry` holds username → open sessions, with `notifyAll` / `notifyUser`.
   - `TodoNotifier` sends after the transaction commits.
+  - (Phase 4 replaces `TodoNotifier` with `TodoEventPublisher` / `TodoEventListener` going through RabbitMQ;
+    the registry methods became `notifyAllJson` / `notifyUserJson`.)
 
 Known limitations, kept on purpose for the lecture:
 - **The token sits in the URL.** Our nginx access log leaves out query strings, but the nginx error log (e.g. on
@@ -99,6 +102,51 @@ instance and hide the bug.
 
 The fix, a shared place where every instance publishes its events, is phase 4.
 
+## Phase 4 — RabbitMQ carries the data
+
+Every instance **publishes** its changes to RabbitMQ, and every instance **receives** all of them and pushes
+them to its own sockets.
+
+```
+Alice ─HTTP─► Alpha ─publish─► [fanout exchange "todo.events"] ─► queue Alpha   ─► Alpha   ─WS─► Alice
+                                                              ├─► queue Bravo   ─► Bravo   ─WS─► Bob
+                                                              └─► queue Charlie ─► Charlie ─WS─► …
+```
+
+- **Fanout exchange:** a copy of every message goes to every bound queue. A single shared work queue would be
+  the classic mistake: each message would reach only ONE instance.
+- **One queue per instance:** exclusive and auto-delete, named like `todo.events.Bravo-…`. It disappears when
+  the instance stops, and a new one appears when it starts.
+- **Who receives it:** headers `audience` (`all` or `user`) and `username` say who should get it. The body is
+  exactly the JSON the browser receives.
+- **One path for everyone:** the instance that made the change gets it back from its own queue too.
+- **The frontend didn't change at all.**
+- **Backend pieces** (`realtime/`):
+  - `BrokerConfig`: the exchange, this instance's queue and the binding between them.
+  - `TodoEventPublisher`: publishes after commit.
+  - `TodoEventListener`: receives from this instance's queue and pushes to its own sockets.
+- **Test:** `MultiInstanceTest` now proves the fix with two real instances: a change made on Alpha reaches Bob
+  on Bravo.
+
+Demo script:
+1. Alice on **Instance 1**, Bob on **Instance 2**. Alice adds an item and Bob sees it right away.
+2. Both on **Load balancer**: changes always arrive.
+3. Open the RabbitMQ UI at http://localhost:15672 (user `websockets`, password `websockets`, demo only).
+   Show the exchange `todo.events`, the three queues (one per instance) and the message rates.
+4. `docker compose -f deploy/docker-compose.yml stop backend-2`: Bravo's queue disappears. `start backend-2`:
+   a new one appears.
+
+Known limitations:
+- **If RabbitMQ is down right after a commit, the event is lost.** It's logged, and the HTTP request still
+  succeeds. The production fix is the *transactional outbox*: store events in the DB in the same transaction,
+  publish them later.
+- **No retries:** a message is acknowledged after it has been pushed to the sockets. If that fails, the event
+  is dropped, not requeued. An instance that is down misses events; its browsers reload the lists after they
+  reconnect.
+- **Health:** when RabbitMQ is down, `/actuator/health` turns DOWN, but the readiness probe (used by the
+  compose healthcheck) stays UP. HTTP still works, only live updates stop.
+- **Messages still carry whole lists.** Phase 5 shows why that hurts and sends only ids.
+
 ### API
 
 | Method | Path                     | Body                       |
@@ -132,8 +180,8 @@ Open http://localhost:8080.
 Requires JDK 25+, Node 22.12+ and Docker (for PostgreSQL).
 
 ```bash
-# database only (exposed on localhost:5433)
-docker compose -f deploy/docker-compose.yml up -d postgres
+# database and message broker only (localhost:5433, localhost:5672)
+docker compose -f deploy/docker-compose.yml up -d postgres rabbitmq
 
 # backends (one terminal each, from backend/)
 ./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8081 --app.instance.name=Alpha"
@@ -151,7 +199,7 @@ The Vite dev server proxies `/i/N/api` (WebSocket included) to port `8080 + N` a
 
 ## Tests
 
-Backend tests start a real PostgreSQL with Testcontainers, so **Docker must be running**.
+Backend tests start a real PostgreSQL and RabbitMQ with Testcontainers, so **Docker must be running**.
 
 ```bash
 (cd backend && ./mvnw test)

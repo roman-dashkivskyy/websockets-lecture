@@ -5,6 +5,17 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5433/websockets}
     username: ${DB_USER:websockets}
     password: ${DB_PASSWORD:websockets}
+  rabbitmq:
+    # The message broker every instance publishes to and listens on (demo credentials).
+    host: ${RABBIT_HOST:localhost}
+    port: ${RABBIT_PORT:5672}
+    username: ${RABBIT_USER:websockets}
+    password: ${RABBIT_PASSWORD:websockets}
+    listener:
+      simple:
+        # A message is acknowledged after it has been pushed to the sockets. If pushing fails, drop it
+        # instead of requeueing it forever: browsers resync (reload the lists) when they reconnect.
+        default-requeue-rejected: false
   jpa:
     open-in-view: false
     hibernate:

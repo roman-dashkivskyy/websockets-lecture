@@ -19,9 +19,6 @@ class SessionRegistryTest {
 
 	private final SessionRegistry registry = new SessionRegistry(JsonMapper.builder().build());
 
-	record Ping(String text) {
-	}
-
 	@Test
 	void notifyUserReachesAllTabsOfThatUserOnly() throws IOException {
 		WebSocketSession aliceTab1 = session("a1");
@@ -31,7 +28,7 @@ class SessionRegistryTest {
 		registry.add("alice", aliceTab2);
 		registry.add("bob", bob);
 
-		registry.notifyUser("alice", new Ping("hi"));
+		registry.notifyUserJson("alice", "{\"text\":\"hi\"}");
 
 		verify(aliceTab1).sendMessage(new TextMessage("{\"text\":\"hi\"}"));
 		verify(aliceTab2).sendMessage(new TextMessage("{\"text\":\"hi\"}"));
@@ -45,10 +42,26 @@ class SessionRegistryTest {
 		registry.add("alice", alice);
 		registry.add("bob", bob);
 
-		registry.notifyAll(new Ping("all"));
+		registry.notifyAllJson("{\"text\":\"all\"}");
 
 		verify(alice).sendMessage(any());
 		verify(bob).sendMessage(any());
+	}
+
+	@Test
+	void readyJsonFromTheBrokerIsSentAsIs() throws IOException {
+		WebSocketSession alice = session("a1");
+		WebSocketSession bob = session("b1");
+		registry.add("alice", alice);
+		registry.add("bob", bob);
+
+		registry.notifyUserJson("alice", "{\"type\":\"LIST_DELETED\",\"listId\":7}");
+		registry.notifyAllJson("{\"type\":\"LIST_DELETED\",\"listId\":8}");
+
+		verify(alice).sendMessage(new TextMessage("{\"type\":\"LIST_DELETED\",\"listId\":7}"));
+		verify(alice).sendMessage(new TextMessage("{\"type\":\"LIST_DELETED\",\"listId\":8}"));
+		verify(bob).sendMessage(new TextMessage("{\"type\":\"LIST_DELETED\",\"listId\":8}"));
+		verify(bob, never()).sendMessage(new TextMessage("{\"type\":\"LIST_DELETED\",\"listId\":7}"));
 	}
 
 	@Test
@@ -71,7 +84,7 @@ class SessionRegistryTest {
 		registry.add("alice", broken);
 		registry.add("alice", healthy);
 
-		registry.notifyUser("alice", new Ping("hi"));
+		registry.notifyUserJson("alice", "{\"text\":\"hi\"}");
 
 		verify(healthy).sendMessage(any());
 		verify(broken).close(any());

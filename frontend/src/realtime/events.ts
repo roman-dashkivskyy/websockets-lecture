@@ -1,6 +1,6 @@
 import type { TodoList } from '../api/todoApi'
 
-/** Changes pushed by the server over the WebSocket (see TodoNotifier on the backend). */
+/** Changes pushed by the server over the WebSocket (see SocketMessages on the backend). */
 export type TodoEvent = { type: 'LIST_CHANGED'; list: TodoList } | { type: 'LIST_DELETED'; listId: number }
 
 /** First message on every socket: which backend instance holds this connection. */

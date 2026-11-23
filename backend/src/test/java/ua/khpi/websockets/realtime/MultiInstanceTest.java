@@ -23,20 +23,22 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.client.standard.StandardWebSocketClient;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 import org.testcontainers.postgresql.PostgreSQLContainer;
+import org.testcontainers.rabbitmq.RabbitMQContainer;
 import ua.khpi.websockets.WebSocketsApplication;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Two backend instances (Alpha and Bravo) sharing one database, like behind the load balancer.
+ * Two backend instances (Alpha and Bravo) sharing one database and one RabbitMQ, like behind the load balancer.
  * <p>
- * PHASE 3, KNOWN BREAKAGE: each instance pushes only to the sockets it holds itself, so a change made
- * through Alpha never reaches a browser connected to Bravo. Phase 4 (message broker) fixes this, and
- * this test then flips its last assertion.
+ * In phase 3 a change made through Alpha never reached a browser connected to Bravo: each instance pushed
+ * only to its own sockets. PHASE 4 FIXES IT: every instance publishes to the broker's fanout exchange and
+ * every instance receives every event, so the change reaches sockets on all instances.
  */
 class MultiInstanceTest {
 
 	static final PostgreSQLContainer postgres = new PostgreSQLContainer("postgres:18-alpine");
+	static final RabbitMQContainer rabbitmq = new RabbitMQContainer("rabbitmq:4-alpine");
 	static ConfigurableApplicationContext alpha;
 	static ConfigurableApplicationContext bravo;
 
@@ -44,8 +46,9 @@ class MultiInstanceTest {
 	final List<WebSocketSession> sessions = new ArrayList<>();
 
 	@BeforeAll
-	static void startDatabaseAndTwoInstances() {
+	static void startInfrastructureAndTwoInstances() {
 		postgres.start();
+		rabbitmq.start();
 		alpha = startInstance("Alpha");
 		bravo = startInstance("Bravo");
 	}
@@ -62,25 +65,44 @@ class MultiInstanceTest {
 	static void stopEverything() {
 		if (bravo != null) bravo.close();
 		if (alpha != null) alpha.close();
+		rabbitmq.stop();
 		postgres.stop();
 	}
 
 	@Test
-	void changeMadeOnOneInstanceDoesNotReachSocketsOnAnother() throws Exception {
+	void publicChangeMadeOnOneInstanceReachesSocketsOnAllInstances() throws Exception {
 		String aliceToken = login(alpha, "alice");
 		String bobToken = login(bravo, "bob"); // the same JWT secret, so either instance could issue it
 
 		BlockingQueue<String> alice = connect(alpha, aliceToken, "Alpha");
 		BlockingQueue<String> bob = connect(bravo, bobToken, "Bravo");
 
-		createPublicList(alpha, aliceToken, "Made on Alpha");
+		createList(alpha, aliceToken, "Made on Alpha", "PUBLIC");
 
-		String aliceGot = alice.poll(5, TimeUnit.SECONDS);
-		assertThat(aliceGot).as("Alice's socket is on Alpha, where the change happened").isNotNull();
-		assertThat((String) JsonPath.read(aliceGot, "$.list.title")).isEqualTo("Made on Alpha");
+		assertListArrived(alice.poll(5, TimeUnit.SECONDS), "Made on Alpha");
+		// Phase 3 failed exactly here: Bob's socket lives on Bravo. Now Bravo gets the event from RabbitMQ.
+		assertListArrived(bob.poll(5, TimeUnit.SECONDS), "Made on Alpha");
+	}
 
-		// Phase 3: Bob's socket lives on Bravo, and Bravo never hears about the change.
-		assertThat(bob.poll(1, TimeUnit.SECONDS)).as("phase 3 breakage: Bob on Bravo misses Alpha's change").isNull();
+	@Test
+	void privateChangeReachesTheOwnersTabsOnAnyInstanceButNobodyElse() throws Exception {
+		String aliceToken = login(alpha, "alice");
+
+		BlockingQueue<String> aliceOnAlpha = connect(alpha, aliceToken, "Alpha");
+		BlockingQueue<String> aliceOnBravo = connect(bravo, aliceToken, "Bravo");
+		BlockingQueue<String> bobOnBravo = connect(bravo, login(bravo, "bob"), "Bravo");
+
+		createList(alpha, aliceToken, "Alice only", "PRIVATE");
+
+		assertListArrived(aliceOnAlpha.poll(5, TimeUnit.SECONDS), "Alice only");
+		assertListArrived(aliceOnBravo.poll(5, TimeUnit.SECONDS), "Alice only");
+		assertThat(bobOnBravo.poll(1, TimeUnit.SECONDS)).as("Bob must not hear about Alice's private list").isNull();
+	}
+
+	private static void assertListArrived(String message, String title) {
+		assertThat(message).as("expected a LIST_CHANGED push").isNotNull();
+		assertThat((String) JsonPath.read(message, "$.type")).isEqualTo("LIST_CHANGED");
+		assertThat((String) JsonPath.read(message, "$.list.title")).isEqualTo(title);
 	}
 
 	private static ConfigurableApplicationContext startInstance(String name) {
@@ -89,7 +111,11 @@ class MultiInstanceTest {
 				"--app.instance.name=" + name,
 				"--spring.datasource.url=" + postgres.getJdbcUrl(),
 				"--spring.datasource.username=" + postgres.getUsername(),
-				"--spring.datasource.password=" + postgres.getPassword());
+				"--spring.datasource.password=" + postgres.getPassword(),
+				"--spring.rabbitmq.host=" + rabbitmq.getHost(),
+				"--spring.rabbitmq.port=" + rabbitmq.getAmqpPort(),
+				"--spring.rabbitmq.username=" + rabbitmq.getAdminUsername(),
+				"--spring.rabbitmq.password=" + rabbitmq.getAdminPassword());
 	}
 
 	private static int port(ConfigurableApplicationContext instance) {
@@ -102,8 +128,10 @@ class MultiInstanceTest {
 		return JsonPath.read(body, "$.token");
 	}
 
-	private void createPublicList(ConfigurableApplicationContext instance, String token, String title) throws Exception {
-		post(instance, "/api/lists", token, "{\"title\": \"%s\", \"visibility\": \"PUBLIC\"}".formatted(title));
+	private void createList(ConfigurableApplicationContext instance, String token, String title, String visibility)
+			throws Exception {
+		post(instance, "/api/lists", token,
+				"{\"title\": \"%s\", \"visibility\": \"%s\"}".formatted(title, visibility));
 	}
 
 	private String post(ConfigurableApplicationContext instance, String path, String token, String json)

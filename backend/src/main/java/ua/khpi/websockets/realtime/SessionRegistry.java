@@ -15,7 +15,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * Open connections of THIS backend instance: username -> (session id -> session).
  * One user can have several sessions, one per browser tab.
- * It lives in memory, so another instance has its own, different registry (that's phase 3).
+ * It lives in memory, so another instance has its own, different registry. RabbitMQ bridges them:
+ * every instance receives every event and pushes it to its own sessions (see TodoEventListener).
  */
 @Component
 public class SessionRegistry {
@@ -47,16 +48,16 @@ public class SessionRegistry {
 	}
 
 	/** Send to every connected user. */
-	public void notifyAll(Object message) {
-		TextMessage text = toJson(message);
+	public void notifyAllJson(String json) {
+		TextMessage text = new TextMessage(json);
 		sessionsByUser.forEach((username, sessions) -> sessions.values().forEach(s -> send(username, s, text)));
 	}
 
 	/** Send to all tabs of one user. */
-	public void notifyUser(String username, Object message) {
+	public void notifyUserJson(String username, String json) {
 		Map<String, WebSocketSession> sessions = sessionsByUser.get(username);
 		if (sessions != null) {
-			TextMessage text = toJson(message);
+			TextMessage text = new TextMessage(json);
 			sessions.values().forEach(s -> send(username, s, text));
 		}
 	}
