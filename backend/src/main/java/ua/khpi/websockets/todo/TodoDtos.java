@@ -21,13 +21,15 @@ public final class TodoDtos {
 
 	}
 
-	/** {@code mine} tells the UI whether the current user may rename or delete the list. */
-	public record TodoListDto(Long id, String title, Visibility visibility, String owner, boolean mine,
-			List<TodoItemDto> items) {
+	/**
+	 * The same snapshot goes to every client (HTTP response or WebSocket push), so it has no per-user fields:
+	 * the UI compares {@code owner} with the signed-in user itself.
+	 */
+	public record TodoListDto(Long id, String title, Visibility visibility, String owner, List<TodoItemDto> items) {
 
-		static TodoListDto from(TodoList list, String currentUser) {
+		static TodoListDto from(TodoList list) {
 			return new TodoListDto(list.getId(), list.getTitle(), list.getVisibility(), list.getOwner().getUsername(),
-					list.isOwnedBy(currentUser), list.getItems().stream().map(TodoItemDto::from).toList());
+					list.getItems().stream().map(TodoItemDto::from).toList());
 		}
 
 	}

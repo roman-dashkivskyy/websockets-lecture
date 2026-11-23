@@ -55,6 +55,13 @@ public class TodoList {
 		this.owner = owner;
 	}
 
+	/** Adds the item to this list's collection too, so a snapshot taken right after includes it. */
+	public TodoItem addItem(String title) {
+		TodoItem item = new TodoItem(this, title);
+		items.add(item);
+		return item;
+	}
+
 	public void removeItem(TodoItem item) {
 		items.remove(item);
 	}

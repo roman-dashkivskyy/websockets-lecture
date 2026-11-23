@@ -21,6 +21,8 @@ import type { TodoItem, TodoList } from '../api/todoApi'
 
 interface Props {
   list: TodoList
+  /** the signed-in user owns this list, so may rename or delete it */
+  mine: boolean
   onRename: (title: string) => Promise<void>
   onDelete: () => Promise<void>
   onAddItem: (title: string) => Promise<void>
@@ -28,7 +30,7 @@ interface Props {
   onDeleteItem: (item: TodoItem) => Promise<void>
 }
 
-export function TodoListCard({ list, onRename, onDelete, onAddItem, onToggleItem, onDeleteItem }: Props) {
+export function TodoListCard({ list, mine, onRename, onDelete, onAddItem, onToggleItem, onDeleteItem }: Props) {
   const [newItem, setNewItem] = useState('')
   const [editing, setEditing] = useState(false)
   const [title, setTitle] = useState(list.title)
@@ -93,11 +95,11 @@ export function TodoListCard({ list, onRename, onDelete, onAddItem, onToggleItem
               label={list.visibility === 'PUBLIC' ? 'Public' : 'Private'}
               color={list.visibility === 'PUBLIC' ? 'primary' : 'default'}
             />
-            {!list.mine && <Chip size="small" variant="outlined" label={`by ${list.owner}`} />}
+            {!mine && <Chip size="small" variant="outlined" label={`by ${list.owner}`} />}
           </Stack>
         }
         action={
-          list.mine && (
+          mine && (
             <>
               <Tooltip title="Rename">
                 <IconButton

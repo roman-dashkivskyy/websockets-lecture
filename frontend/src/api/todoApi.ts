@@ -15,8 +15,6 @@ export interface TodoList {
   title: string
   visibility: Visibility
   owner: string
-  /** true if the signed-in user owns the list and may rename or delete it */
-  mine: boolean
   items: TodoItem[]
 }
 

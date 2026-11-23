@@ -41,6 +41,9 @@ public class SecurityConfig {
 			.authorizeHttpRequests(auth -> auth
 				.requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
 				.requestMatchers(HttpMethod.GET, "/api/instance").permitAll()
+				// The browser can't send an Authorization header on a WebSocket handshake;
+				// TokenHandshakeInterceptor checks the ?token=... instead.
+				.requestMatchers(HttpMethod.GET, "/api/ws").permitAll()
 				.requestMatchers("/actuator/health", "/actuator/health/**", "/actuator/info", "/error").permitAll()
 				.anyRequest().authenticated())
 			.oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))

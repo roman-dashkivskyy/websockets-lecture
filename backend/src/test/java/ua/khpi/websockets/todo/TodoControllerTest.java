@@ -80,7 +80,7 @@ class TodoControllerTest {
 		long listId = createList("alice", "Team tasks", Visibility.PUBLIC);
 
 		mvc.perform(get("/api/lists").with(as("bob")))
-			.andExpect(jsonPath("$[?(@.id == %d)].mine".formatted(listId)).value(false));
+			.andExpect(jsonPath("$[?(@.id == %d)].owner".formatted(listId)).value("alice"));
 		mvc.perform(json(post("/api/lists/{id}/items", listId), "{\"title\": \"Bob was here\"}").with(as("bob")))
 			.andExpect(status().isCreated());
 		mvc.perform(json(patch("/api/lists/{id}", listId), "{\"title\": \"Mine now\"}").with(as("bob")))
@@ -110,7 +110,6 @@ class TodoControllerTest {
 				.with(as(user)))
 			.andExpect(status().isCreated())
 			.andExpect(jsonPath("$.owner").value(user))
-			.andExpect(jsonPath("$.mine").value(true))
 			.andReturn().getResponse().getContentAsString();
 		return id(body);
 	}

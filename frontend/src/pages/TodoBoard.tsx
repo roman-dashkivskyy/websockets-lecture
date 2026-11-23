@@ -1,45 +1,56 @@
-import { useCallback, useEffect, useState } from 'react'
-import { Alert, Box, Button, Grid, Snackbar, Stack, Typography } from '@mui/material'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Alert, Box, Button, Chip, Grid, Snackbar, Stack } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
-import RefreshIcon from '@mui/icons-material/Refresh'
 import { useTodoApi, type TodoItem, type TodoList, type Visibility } from '../api/todoApi'
+import { useAuth } from '../auth/AuthContext'
 import { NewListDialog } from '../components/NewListDialog'
 import { TodoListCard } from '../components/TodoListCard'
+import { applyEvent, type TodoEvent } from '../realtime/events'
+import { useTodoSocket, type SocketStatus } from '../realtime/useTodoSocket'
 
 /**
- * Phase 1: plain HTTP. Our own changes show up immediately (we update local state from the
- * response), but changes made by other users appear only after "Refresh".
+ * Phase 2: HTTP for commands, WebSocket for updates.
+ * We load the lists once; after that every change, ours or anybody else's, arrives as a push message.
  */
 export function TodoBoard() {
   const api = useTodoApi()
+  const { session } = useAuth()
   const [lists, setLists] = useState<TodoList[] | null>(null)
-  const [loadedAt, setLoadedAt] = useState<Date | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
 
+  // Messages that arrive while the first GET /lists is still running are applied right after it.
+  const loaded = useRef(false)
+  const pending = useRef<TodoEvent[]>([])
+
+  const onEvent = useCallback((event: TodoEvent) => {
+    if (!loaded.current) {
+      pending.current.push(event)
+      return
+    }
+    setLists((current) => applyEvent(current ?? [], event))
+  }, [])
+
+  const status = useTodoSocket(session!.token, onEvent)
+
   const report = (e: unknown) => setError(e instanceof Error ? e.message : String(e))
 
-  const refresh = useCallback(() => {
+  // Load once the socket is open, so no change can slip in between the load and the first push.
+  // If the handshake was refused, load anyway: a dead token then gets the normal 401 -> back to sign-in.
+  useEffect(() => {
+    if (status === 'connecting' || loaded.current) return
     api
       .lists()
       .then((result) => {
-        setLists(result)
-        setLoadedAt(new Date())
+        loaded.current = true
+        setLists(pending.current.reduce(applyEvent, result))
+        pending.current = []
       })
-      .catch(report)
-  }, [api])
-
-  useEffect(refresh, [refresh])
-
-  /** Replace one list in local state with the result of a change. */
-  const updateList = (listId: number, change: (list: TodoList) => TodoList | null) =>
-    setLists((current) =>
-      (current ?? []).flatMap((list) => {
-        if (list.id !== listId) return [list]
-        const changed = change(list)
-        return changed ? [changed] : []
-      }),
-    )
+      .catch((e) => {
+        pending.current = []
+        report(e)
+      })
+  }, [status, api])
 
   /** Show the error, then fail the promise so forms keep the user's input. */
   const reportAndRethrow = (e: unknown): never => {
@@ -47,13 +58,9 @@ export function TodoBoard() {
     throw e
   }
 
+  // Commands only: the new state comes back over the WebSocket.
   const createList = (title: string, visibility: Visibility) =>
-    api
-      .createList(title, visibility)
-      .then((created) => setLists((current) => [...(current ?? []), created]))
-      .catch(reportAndRethrow)
-
-  const run = (action: () => Promise<void>) => () => action().catch(report)
+    api.createList(title, visibility).then(() => undefined, reportAndRethrow)
 
   return (
     <Box>
@@ -61,12 +68,7 @@ export function TodoBoard() {
         <Button variant="contained" startIcon={<AddIcon />} onClick={() => setDialogOpen(true)}>
           New list
         </Button>
-        <Button variant="outlined" startIcon={<RefreshIcon />} onClick={refresh}>
-          Refresh
-        </Button>
-        <Typography variant="body2" color="text.secondary">
-          {loadedAt ? `Loaded at ${loadedAt.toLocaleTimeString()}` : 'Loading…'}
-        </Typography>
+        <StatusChip status={status} />
       </Stack>
 
       {lists && lists.length === 0 && <Alert severity="info">No lists yet. Create the first one.</Alert>}
@@ -76,39 +78,14 @@ export function TodoBoard() {
           <Grid key={list.id} size={{ xs: 12, sm: 6, md: 4 }}>
             <TodoListCard
               list={list}
-              onRename={(title) =>
-                api
-                  .renameList(list.id, title)
-                  .then((renamed) => updateList(list.id, () => renamed))
-                  .catch(reportAndRethrow)
-              }
-              onDelete={run(async () => {
-                await api.deleteList(list.id)
-                updateList(list.id, () => null)
-              })}
-              onAddItem={(title) =>
-                api
-                  .addItem(list.id, title)
-                  .then((item) => updateList(list.id, (l) => ({ ...l, items: [...l.items, item] })))
-                  .catch(reportAndRethrow)
-              }
+              mine={list.owner === session!.username}
+              onRename={(title) => api.renameList(list.id, title).then(() => undefined, reportAndRethrow)}
+              onDelete={() => api.deleteList(list.id).catch(report)}
+              onAddItem={(title) => api.addItem(list.id, title).then(() => undefined, reportAndRethrow)}
               onToggleItem={(item: TodoItem) =>
-                api
-                  .updateItem(item.id, { done: !item.done })
-                  .then((updated) =>
-                    updateList(list.id, (l) => ({
-                      ...l,
-                      items: l.items.map((i) => (i.id === updated.id ? updated : i)),
-                    })),
-                  )
-                  .catch(report)
+                api.updateItem(item.id, { done: !item.done }).then(() => undefined, report)
               }
-              onDeleteItem={(item: TodoItem) =>
-                api
-                  .deleteItem(item.id)
-                  .then(() => updateList(list.id, (l) => ({ ...l, items: l.items.filter((i) => i.id !== item.id) })))
-                  .catch(report)
-              }
+              onDeleteItem={(item: TodoItem) => api.deleteItem(item.id).catch(report)}
             />
           </Grid>
         ))}
@@ -123,4 +100,15 @@ export function TodoBoard() {
       </Snackbar>
     </Box>
   )
+}
+
+function StatusChip({ status }: { status: SocketStatus }) {
+  switch (status) {
+    case 'live':
+      return <Chip color="success" label="Live" />
+    case 'connecting':
+      return <Chip label="Connecting…" />
+    case 'closed':
+      return <Chip color="error" label="Disconnected: reload the page" />
+  }
 }

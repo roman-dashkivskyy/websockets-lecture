@@ -2,6 +2,7 @@ package ua.khpi.websockets.todo;
 
 import java.util.List;
 
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -13,6 +14,8 @@ import ua.khpi.websockets.todo.TodoDtos.CreateListRequest;
 import ua.khpi.websockets.todo.TodoDtos.TodoItemDto;
 import ua.khpi.websockets.todo.TodoDtos.TodoListDto;
 import ua.khpi.websockets.todo.TodoDtos.UpdateItemRequest;
+import ua.khpi.websockets.todo.TodoEvents.ListChanged;
+import ua.khpi.websockets.todo.TodoEvents.ListDeleted;
 
 /**
  * Access rules in one place:
@@ -22,6 +25,8 @@ import ua.khpi.websockets.todo.TodoDtos.UpdateItemRequest;
  * <li>only the owner can rename or delete a list.</li>
  * </ul>
  * Somebody else's private list answers 404, so we don't reveal that it exists.
+ * <p>
+ * Every change publishes a {@link TodoEvents} event with the new state of the list.
  */
 @Service
 @Transactional
@@ -30,16 +35,19 @@ public class TodoService {
 	private final TodoListRepository lists;
 	private final TodoItemRepository items;
 	private final AppUserRepository users;
+	private final ApplicationEventPublisher events;
 
-	TodoService(TodoListRepository lists, TodoItemRepository items, AppUserRepository users) {
+	TodoService(TodoListRepository lists, TodoItemRepository items, AppUserRepository users,
+			ApplicationEventPublisher events) {
 		this.lists = lists;
 		this.items = items;
 		this.users = users;
+		this.events = events;
 	}
 
 	@Transactional(readOnly = true)
 	public List<TodoListDto> visibleLists(String username) {
-		return lists.findVisibleTo(username).stream().map(list -> TodoListDto.from(list, username)).toList();
+		return lists.findVisibleTo(username).stream().map(TodoListDto::from).toList();
 	}
 
 	public TodoListDto createList(String username, CreateListRequest request) {
@@ -47,21 +55,25 @@ public class TodoService {
 		AppUser owner = users.findByUsername(username)
 			.orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Unknown user, please sign in again"));
 		TodoList list = lists.save(new TodoList(request.title().strip(), request.visibility(), owner));
-		return TodoListDto.from(list, username);
+		return changed(list);
 	}
 
 	public TodoListDto renameList(String username, long listId, String title) {
 		TodoList list = ownedList(username, listId);
 		list.setTitle(title.strip());
-		return TodoListDto.from(list, username);
+		return changed(list);
 	}
 
 	public void deleteList(String username, long listId) {
-		lists.delete(ownedList(username, listId));
+		TodoList list = ownedList(username, listId);
+		lists.delete(list);
+		events.publishEvent(new ListDeleted(listId, list.getVisibility(), list.getOwner().getUsername()));
 	}
 
 	public TodoItemDto addItem(String username, long listId, CreateItemRequest request) {
-		TodoItem item = items.save(new TodoItem(visibleList(username, listId), request.title().strip()));
+		TodoList list = visibleList(username, listId);
+		TodoItem item = items.save(list.addItem(request.title().strip()));
+		changed(list);
 		return TodoItemDto.from(item);
 	}
 
@@ -73,12 +85,27 @@ public class TodoService {
 		if (request.done() != null) {
 			item.setDone(request.done());
 		}
+		changed(item.getList());
 		return TodoItemDto.from(item);
 	}
 
 	public void deleteItem(String username, long itemId) {
 		TodoItem item = visibleItem(username, itemId);
-		item.getList().removeItem(item);
+		TodoList list = item.getList();
+		list.removeItem(item);
+		changed(list);
+	}
+
+	/**
+	 * Snapshot the list and announce it. Listeners act only after the transaction commits.
+	 * Known limitation (deliberate until phase 5): two users changing the same list at the same moment each
+	 * snapshot only their own change, and the snapshot pushed last wins on every screen until the next change.
+	 * Phase 5 sends only ids and lets the receiver re-read the current state.
+	 */
+	private TodoListDto changed(TodoList list) {
+		TodoListDto snapshot = TodoListDto.from(list);
+		events.publishEvent(new ListChanged(snapshot));
+		return snapshot;
 	}
 
 	private TodoList visibleList(String username, long listId) {
