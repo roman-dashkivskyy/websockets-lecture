@@ -1,0 +1,37 @@
+spring:
+  application:
+    name: websockets-lecture
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5433/websockets}
+    username: ${DB_USER:websockets}
+    password: ${DB_PASSWORD:websockets}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate   # Flyway owns the schema
+  mvc:
+    problemdetails:
+      enabled: true        # all errors are JSON ProblemDetail
+
+server:
+  port: ${PORT:8080}
+
+app:
+  instance:
+    # Each backend copy gets its own name: INSTANCE_NAME=Alpha, Bravo, ...
+    name: ${INSTANCE_NAME:local}
+  jwt:
+    # Must be the SAME on every instance, so a token issued by one is accepted by all.
+    # The default is for local development only.
+    secret: ${JWT_SECRET:dev-only-secret-change-me-0123456789abcdef}
+    ttl: 2h
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true

@@ -1,0 +1,14 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Java / Maven
+target/
+
+# Node
+node_modules/
+dist/
+*.local
+*.log
