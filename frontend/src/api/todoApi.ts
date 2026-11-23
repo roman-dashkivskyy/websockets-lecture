@@ -1,6 +1,7 @@
 import { useMemo } from 'react'
 import { useAuth } from '../auth/AuthContext'
-import { ApiError, apiRequest, type RequestOptions } from './client'
+import { useApi } from './ApiContext'
+import { ApiError, type RequestOptions } from './client'
 
 export type Visibility = 'PUBLIC' | 'PRIVATE'
 
@@ -20,13 +21,14 @@ export interface TodoList {
 
 /** Todo endpoints, called with the current user's token. A 401 sends the user back to the login page. */
 export function useTodoApi() {
+  const { request } = useApi()
   const { session, logout } = useAuth()
   const token = session?.token
 
   return useMemo(() => {
     const call = async <T,>(path: string, options: RequestOptions = {}) => {
       try {
-        return await apiRequest<T>(path, { ...options, token })
+        return await request<T>(path, { ...options, token })
       } catch (e) {
         if (e instanceof ApiError && e.status === 401) logout('Your session has expired. Please sign in again.')
         throw e
@@ -46,5 +48,5 @@ export function useTodoApi() {
         call<TodoItem>(`/items/${itemId}`, { method: 'PATCH', body: changes }),
       deleteItem: (itemId: number) => call<void>(`/items/${itemId}`, { method: 'DELETE' }),
     }
-  }, [token, logout])
+  }, [request, token, logout])
 }

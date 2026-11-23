@@ -1,5 +1,5 @@
-/** All backend endpoints live under /api (nginx in Docker, the Vite proxy in dev). */
-const API_BASE = '/api'
+/** Header set by every backend instance (see InstanceHeaderFilter). */
+export const INSTANCE_HEADER = 'X-Instance-Name'
 
 /** Error with the HTTP status and the "detail" of a Spring ProblemDetail body. */
 export class ApiError extends Error {
@@ -17,18 +17,30 @@ export interface RequestOptions {
   token?: string | null
 }
 
-/** fetch() wrapper: JSON in/out, bearer token, ProblemDetail errors. */
-export async function apiRequest<T>(path: string, { method = 'GET', body, token }: RequestOptions = {}): Promise<T> {
+/**
+ * fetch() wrapper: JSON in/out, bearer token, ProblemDetail errors.
+ * basePath is "/api" (load balancer) or "/i/N/api" (one instance).
+ * Calls onInstance with the name of the backend instance that answered.
+ */
+export async function apiRequest<T>(
+  basePath: string,
+  path: string,
+  { method = 'GET', body, token }: RequestOptions,
+  onInstance: (name: string) => void,
+): Promise<T> {
   const headers: Record<string, string> = {}
   if (body !== undefined) headers['Content-Type'] = 'application/json'
   if (token) headers.Authorization = `Bearer ${token}`
 
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(`${basePath}${path}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
     cache: 'no-store',
   })
+
+  const instance = response.headers.get(INSTANCE_HEADER)
+  if (instance) onInstance(instance)
 
   if (!response.ok) {
     throw new ApiError(response.status, await errorMessage(response))

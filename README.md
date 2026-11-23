@@ -7,7 +7,7 @@ one React UI talking to several copies of the same backend.
 |------------|--------------------------------------------------------------------------|
 | `backend`  | Java 25, Spring Boot 4.1, Spring MVC, WebSocket, Spring Security (JWT), JPA, Flyway |
 | `frontend` | React 19, TypeScript, Vite 8, Material UI 9                              |
-| `deploy`   | Docker Compose: PostgreSQL, backend, nginx                               |
+| `deploy`   | Docker Compose: PostgreSQL, 3 backend instances, nginx load balancer     |
 
 Each phase of the lecture is a git tag:
 
@@ -15,6 +15,7 @@ Each phase of the lecture is a git tag:
 |---------------------|-------------------------------------------------------------|
 | `step-1-http`       | Todo app over plain HTTP: login, public and private lists   |
 | `step-2-websockets` | Live updates: the server pushes every change over a WebSocket |
+| `step-3-load-balancer` | Three instances behind a load balancer, and live updates break |
 
 ## Phase 1 — todo app over HTTP
 
@@ -59,7 +60,44 @@ Known limitations, kept on purpose for the lecture:
   and the receiver re-reads the current state.
 - **Pushes run on the HTTP request thread** after commit, so a very slow client can delay that response.
 
-Phases 1–2 run a single backend. Several instances behind a load balancer come in phase 3.
+## Phase 3 — load balancer with three instances (and why it breaks)
+
+Real systems run several copies of a service behind a load balancer (AWS ELB, GCP Load Balancing, …),
+which may add or remove instances at any time. Here nginx round-robins over **Alpha, Bravo and Charlie**.
+
+```
+                      ┌─► backend-1 "Alpha"   ─┐
+browser ──► nginx ────┼─► backend-2 "Bravo"   ─┼──► PostgreSQL
+  /api/* round-robin  └─► backend-3 "Charlie" ─┘
+  /i/N/api/* → backend-N only
+```
+
+**It breaks.** Every instance keeps its *own* in-memory list of open sockets (`SessionRegistry`). A change is
+pushed only by the instance that handled the HTTP request, so browsers whose socket lives on another instance
+never hear about it. `MultiInstanceTest` proves this with two real instances.
+
+The UI shows what's going on:
+- The **Backend** selector (header) sends everything through the load balancer or pins the tab to one instance.
+- **HTTP answered by** shows which instance served the last request (`X-Instance-Name` header).
+- **WebSocket: live on …** shows where the socket lives (the server's first message is `CONNECTED`).
+
+Demo script:
+1. Alice's tab on **Instance 1**, Bob's on **Instance 2**. Alice adds an item: Bob sees nothing.
+2. Both on **Load balancer**: sometimes it works, sometimes not. Even Alice's own change may not come back,
+   because her request went to Charlie while her socket lives on Alpha.
+3. `docker compose -f deploy/docker-compose.yml stop backend-2`: Bob's chip shows "reconnecting". After
+   `start backend-2` (or on the load balancer, right away on another instance) he reconnects and reloads the
+   lists, so he catches up on what he missed.
+
+**Why sticky sessions don't fix it.** Stickiness (e.g. nginx `ip_hash`) keeps *one client* on one instance. But
+Alice and Bob are different clients on different instances, so Alice's change still never reaches Bob's
+instance. Watch out in demos: on one laptop all tabs share an IP, so `ip_hash` would put everybody on the same
+instance and hide the bug.
+
+**Reconnect:** if the socket drops, the browser retries with exponential backoff (about 1 s, 2 s, 4 s … up to
+15 s, with jitter) and reloads the lists after every reconnect.
+
+The fix, a shared place where every instance publishes its events, is phase 4.
 
 ### API
 
@@ -97,15 +135,19 @@ Requires JDK 25+, Node 22.12+ and Docker (for PostgreSQL).
 # database only (exposed on localhost:5433)
 docker compose -f deploy/docker-compose.yml up -d postgres
 
-# backend (from backend/)
-./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8081"
+# backends (one terminal each, from backend/)
+./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8081 --app.instance.name=Alpha"
+./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8082 --app.instance.name=Bravo"
+./mvnw spring-boot:run -Dspring-boot.run.arguments="--server.port=8083 --app.instance.name=Charlie"
 
 # frontend (from frontend/)
 npm install
 npm run dev        # http://localhost:5173
 ```
 
-The Vite dev server proxies `/api` (including the WebSocket) to `http://localhost:8081` (override with the `BACKEND_URL` env variable).
+The Vite dev server proxies `/i/N/api` (WebSocket included) to port `8080 + N` and `/api` to the first instance
+(there is no real load balancer in dev mode; use Docker for that). Env variables: `BACKEND_BASE_PORT` (default
+8081) and `VITE_BACKEND_COUNT` (default 3, also the number of instances in the UI's Backend selector).
 
 ## Tests
 

@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { CssBaseline, ThemeProvider, createTheme } from '@mui/material'
 import App from './App.tsx'
+import { ApiProvider } from './api/ApiProvider.tsx'
 import { AuthProvider } from './auth/AuthProvider.tsx'
 
 const theme = createTheme({
@@ -12,9 +13,11 @@ createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <AuthProvider>
-        <App />
-      </AuthProvider>
+      <ApiProvider>
+        <AuthProvider>
+          <App />
+        </AuthProvider>
+      </ApiProvider>
     </ThemeProvider>
   </StrictMode>,
 )

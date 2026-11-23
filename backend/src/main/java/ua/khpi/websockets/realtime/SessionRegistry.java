@@ -61,6 +61,11 @@ public class SessionRegistry {
 		}
 	}
 
+	/** Send to one particular tab (e.g. the CONNECTED greeting). */
+	public void notifySession(String username, WebSocketSession session, Object message) {
+		send(username, session, toJson(message));
+	}
+
 	int sessionCount(String username) {
 		Map<String, WebSocketSession> sessions = sessionsByUser.get(username);
 		return sessions == null ? 0 : sessions.size();

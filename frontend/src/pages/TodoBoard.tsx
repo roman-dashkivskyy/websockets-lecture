@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Alert, Box, Button, Chip, Grid, Snackbar, Stack } from '@mui/material'
 import AddIcon from '@mui/icons-material/Add'
+import { useApi } from '../api/ApiContext'
 import { useTodoApi, type TodoItem, type TodoList, type Visibility } from '../api/todoApi'
 import { useAuth } from '../auth/AuthContext'
 import { NewListDialog } from '../components/NewListDialog'
@@ -9,17 +10,20 @@ import { applyEvent, type TodoEvent } from '../realtime/events'
 import { useTodoSocket, type SocketStatus } from '../realtime/useTodoSocket'
 
 /**
- * Phase 2: HTTP for commands, WebSocket for updates.
- * We load the lists once; after that every change, ours or anybody else's, arrives as a push message.
+ * HTTP for commands, WebSocket for updates. The lists are (re)loaded on every new connection, because
+ * updates may have been missed while disconnected; after that every change arrives as a push message.
+ * Phase 3: a change is pushed only by the instance that handled it, so with several instances behind
+ * the load balancer, browsers whose socket lives on another instance miss it.
  */
 export function TodoBoard() {
   const api = useTodoApi()
+  const { target } = useApi()
   const { session } = useAuth()
   const [lists, setLists] = useState<TodoList[] | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [dialogOpen, setDialogOpen] = useState(false)
 
-  // Messages that arrive while the first GET /lists is still running are applied right after it.
+  // Messages that arrive while GET /lists is still running are applied right after it.
   const loaded = useRef(false)
   const pending = useRef<TodoEvent[]>([])
 
@@ -31,26 +35,37 @@ export function TodoBoard() {
     setLists((current) => applyEvent(current ?? [], event))
   }, [])
 
-  const status = useTodoSocket(session!.token, onEvent)
+  const status = useTodoSocket(target.basePath, session!.token, onEvent)
 
   const report = (e: unknown) => setError(e instanceof Error ? e.message : String(e))
 
-  // Load once the socket is open, so no change can slip in between the load and the first push.
-  // If the handshake was refused, load anyway: a dead token then gets the normal 401 -> back to sign-in.
+  const loadKey = loadKeyFor(status)
+
   useEffect(() => {
-    if (status === 'connecting' || loaded.current) return
+    if (loadKey === null) return
+    // While reconnecting we reload quietly: errors (e.g. the instance is down) would only spam the screen,
+    // but an expired token still gets 401 -> back to sign-in (handled inside useTodoApi).
+    const quiet = loadKey.startsWith('retry-')
+    let cancelled = false // a newer connection or retry started a newer load
+    loaded.current = false
+    pending.current = []
     api
       .lists()
       .then((result) => {
+        if (cancelled) return
         loaded.current = true
         setLists(pending.current.reduce(applyEvent, result))
         pending.current = []
       })
       .catch((e) => {
+        if (cancelled) return
         pending.current = []
-        report(e)
+        if (!quiet) report(e)
       })
-  }, [status, api])
+    return () => {
+      cancelled = true
+    }
+  }, [loadKey, api])
 
   /** Show the error, then fail the promise so forms keep the user's input. */
   const reportAndRethrow = (e: unknown): never => {
@@ -102,13 +117,25 @@ export function TodoBoard() {
   )
 }
 
+/**
+ * When to (re)load the lists:
+ * - after every successful (re)connect: we may have missed updates while disconnected;
+ * - after every failed reconnect attempt (at the backoff pace): keeps the board fresh during an outage,
+ *   and a dead token reaches the normal 401 -> sign-in path instead of retrying forever.
+ */
+function loadKeyFor(status: SocketStatus): string | null {
+  if (status.state === 'live') return `connection-${status.connection}`
+  if (status.state === 'reconnecting') return `retry-${status.attempt}`
+  return null
+}
+
 function StatusChip({ status }: { status: SocketStatus }) {
-  switch (status) {
+  switch (status.state) {
     case 'live':
-      return <Chip color="success" label="Live" />
+      return <Chip color="success" label={status.instance ? `WebSocket: live on ${status.instance}` : 'WebSocket: live'} />
     case 'connecting':
-      return <Chip label="Connecting…" />
-    case 'closed':
-      return <Chip color="error" label="Disconnected: reload the page" />
+      return <Chip label="WebSocket: connecting…" />
+    case 'reconnecting':
+      return <Chip color="warning" label={`WebSocket: reconnecting in ~${status.inSeconds} s`} />
   }
 }

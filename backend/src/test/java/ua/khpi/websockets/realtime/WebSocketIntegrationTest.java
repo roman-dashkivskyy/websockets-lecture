@@ -59,6 +59,13 @@ class WebSocketIntegrationTest {
 	}
 
 	@Test
+	void firstMessageNamesTheInstanceTheSocketLivesOn() throws Exception {
+		// connect() itself waits for {"type":"CONNECTED","instance":"Alpha"} and fails otherwise
+		BlockingQueue<String> alice = connect(login("alice"));
+		assertThat(alice.poll(300, TimeUnit.MILLISECONDS)).as("nothing else is sent on connect").isNull();
+	}
+
+	@Test
 	void browserFromAnotherSiteIsRejectedEvenWithValidToken() throws Exception {
 		String token = login("alice");
 		// browsers always send Origin; the default same-origin check must accept ours and reject others
@@ -133,6 +140,11 @@ class WebSocketIntegrationTest {
 			}, headers, URI.create("ws://localhost:" + port + "/api/ws" + query))
 			.get(5, TimeUnit.SECONDS);
 		openSessions.add(session);
+
+		String hello = received.poll(5, TimeUnit.SECONDS);
+		assertThat(hello).as("expected the CONNECTED greeting").isNotNull();
+		assertThat((String) JsonPath.read(hello, "$.type")).isEqualTo("CONNECTED");
+		assertThat((String) JsonPath.read(hello, "$.instance")).isEqualTo("Alpha");
 		return received;
 	}
 

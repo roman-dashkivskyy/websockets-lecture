@@ -1,5 +1,5 @@
 import { useCallback, useMemo, useState, type ReactNode } from 'react'
-import { apiRequest } from '../api/client'
+import { useApi } from '../api/ApiContext'
 import { readSession, writeSession } from '../util/sessionStore'
 import { AuthContext, type Session } from './AuthContext'
 
@@ -17,18 +17,19 @@ function restoreSession(): Session | null {
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const { request } = useApi()
   const [session, setSession] = useState<Session | null>(restoreSession)
   const [notice, setNotice] = useState<string | null>(null)
 
   const login = useCallback(async (username: string, password: string) => {
-    const result = await apiRequest<Session>('/auth/login', {
+    const result = await request<Session>('/auth/login', {
       method: 'POST',
       body: { username, password },
     })
     writeSession(SESSION_KEY, JSON.stringify(result))
     setNotice(null)
     setSession(result)
-  }, [])
+  }, [request])
 
   const logout = useCallback((reason?: string) => {
     writeSession(SESSION_KEY, null)
